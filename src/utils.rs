@@ -26,7 +26,7 @@ pub fn ripemd160_digest(data: &[u8]) -> Vec<u8> {
     ripemd160.input(data);
     let mut buf: Vec<u8> = repeat(0).take(ripemd160.output_bytes()).collect();
     ripemd160.result(&mut buf);
-    return buf
+    buf
 }
 
 pub fn base58_encode(data: &[u8]) -> String {

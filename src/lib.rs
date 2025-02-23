@@ -1,5 +1,7 @@
-pub mod wallets;
+mod wallet;
 
+mod wallets;
+pub use wallets::Wallets;
 
 pub mod utils;
 use utils::new_key_pair;

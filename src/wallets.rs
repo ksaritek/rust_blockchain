@@ -1,125 +1,71 @@
-use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
-use serde::{Serialize, Deserialize};
-use std::fmt;
-use hex;
+use crate::wallet::{Wallet, WalletError};
+use std::collections::HashMap;
+use std::env::current_dir;
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Read, Write};
 
-const VERSION: u8 = 0x00;
-pub const ADDRESS_CHECK_SUM_LEN: usize = 4;
+pub const WALLET_FILE: &str = "wallet.dat";
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Wallet {
-    pkcs8: Vec<u8>,
-    public_key: Vec<u8>,
+pub struct Wallets {
+    wallets: HashMap<String, Wallet>,
 }
 
-impl Wallet {
-    pub fn new() -> Result<Wallet, ring::error::Unspecified> {
-        let pkcs8 = crate::new_key_pair()?;
-        let key_pair = EcdsaKeyPair::from_pkcs8(
-            &ECDSA_P256_SHA256_FIXED_SIGNING,
-             pkcs8.as_ref())?;
-
-        let public_key = key_pair.public_key().as_ref().to_vec();
-        Ok(Wallet { pkcs8, public_key })
+impl Wallets {
+    pub fn new() -> Result<Wallets, WalletError> {
+        let mut wallets = Wallets {
+            wallets: HashMap::new(),
+        };
+        wallets.load_from_file()?;
+        Ok(wallets)
     }
 
-    pub fn get_address(&self) -> String {
-        let pub_key_hash = hash_pub_key(self.public_key.as_slice());
-        let mut payload: Vec<u8> = vec![];
-        payload.push(VERSION);
-        payload.extend(pub_key_hash.as_slice());
-        let checksum = checksum(payload.as_slice());
-        payload.extend(checksum.as_slice());
-        // version + pub_key_hash + checksum
-        crate::base58_encode(payload.as_slice())
-    }
-
-    pub fn get_public_key(&self) -> &[u8] {
-        self.public_key.as_slice()
-    }
-
-    pub fn get_pkcs8(&self) -> &[u8] {
-        self.pkcs8.as_slice()
-    }
-}
-
-impl fmt::Debug for Wallet {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Wallet")
-            .field("pkcs8", &hex::encode(&self.pkcs8))
-            .field("public_key", &hex::encode(&self.public_key))
-            .finish()
-    }
-}
-
-pub fn hash_pub_key(pub_key: &[u8]) -> Vec<u8> {
-    let pub_key_sha256 = crate::sha256_digest(pub_key);
-    crate::ripemd160_digest(pub_key_sha256.as_slice())
-}
-
-fn checksum(payload: &[u8]) -> Vec<u8> {
-    let first_sha = crate::sha256_digest(payload);
-    let second_sha = crate::sha256_digest(first_sha.as_slice());
-    second_sha[0..ADDRESS_CHECK_SUM_LEN].to_vec()
-}
-
-pub fn validate_address(address: &str) -> bool {
-    crate::base58_decode(address)
-        .map(|payload| {
-            let actual_checksum = &payload[payload.len() - ADDRESS_CHECK_SUM_LEN..];
-            let version = payload[0];
-            let pub_key_hash = &payload[1..payload.len() - ADDRESS_CHECK_SUM_LEN];
-
-            let mut target_vec = vec![version];
-            target_vec.extend_from_slice(pub_key_hash);
-            let target_checksum = checksum(&target_vec);
-            actual_checksum == target_checksum.as_slice()
-        })
-        .unwrap_or(false)
-}
-
-pub fn convert_address(pub_hash_key: &[u8]) -> String {
-    let mut payload: Vec<u8> = vec![];
-    payload.push(VERSION);
-    payload.extend(pub_hash_key);
-    let checksum = checksum(payload.as_slice());
-    payload.extend(checksum.as_slice());
-    crate::base58_encode(payload.as_slice())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_wallet_creation() {
-        let wallet = Wallet::new().unwrap();
-        println!("{:?}", wallet);
-        
-        assert!(!wallet.get_public_key().is_empty());
-        assert!(!wallet.get_pkcs8().is_empty());
-    }
-
-    #[test]
-    fn test_get_address() {
-        let wallet = Wallet::new().unwrap();
+    pub fn create_wallet(&mut self) -> Result<String, WalletError> {
+        let wallet = Wallet::new()?;
         let address = wallet.get_address();
-        assert!(validate_address(&address));
+        self.wallets.insert(address.clone(), wallet);
+        self.save_to_file()?;
+        Ok(address)
     }
 
-    #[test]
-    fn test_validate_address() {
-        let wallet = Wallet::new().unwrap();
-        let address = wallet.get_address();
-        assert!(validate_address(&address));
-        assert!(!validate_address("invalid_address"));
+    pub fn get_addresses(&self) -> Vec<String> {
+        let mut addresses = vec![];
+        for (address, _) in &self.wallets {
+            addresses.push(address.clone())
+        }
+        return addresses;
     }
 
-    #[test]
-    fn test_convert_address() {
-        let wallet = Wallet::new().unwrap();
-        let pub_key_hash = hash_pub_key(wallet.get_public_key());
-        let address = convert_address(&pub_key_hash);
-        assert!(validate_address(&address));
+    pub fn get_wallet(&self, address: &str) -> Option<&Wallet> {
+        if let Some(wallet) = self.wallets.get(address) {
+            return Some(wallet);
+        }
+        None
+    }
+
+    fn load_from_file(&mut self) -> Result<(), WalletError> {
+        let path = current_dir()?.join(WALLET_FILE);
+        if !path.exists() {
+            return Ok(());
+        }
+        let mut file = File::open(path)?;
+        let metadata = file.metadata()?;
+        let mut buf = vec![0; metadata.len() as usize];
+        file.read(&mut buf)?;
+        let wallets: HashMap<String, Wallet> = bincode::deserialize(&buf[..]).map_err(WalletError::Serialization)?;
+        self.wallets = wallets;
+        Ok(())
+    }
+
+    fn save_to_file(&self) -> Result<(), WalletError> {
+        let path = current_dir()?.join(WALLET_FILE);
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&path)?;
+        let mut writer = BufWriter::new(file);
+        let wallets_bytes = bincode::serialize(&self.wallets)?;
+        writer.write_all(&wallets_bytes)?;
+        writer.flush()?;
+        Ok(())
     }
 }

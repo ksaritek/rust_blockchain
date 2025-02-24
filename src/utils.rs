@@ -1,4 +1,5 @@
 use std::iter::repeat;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crypto::digest::Digest;
 use ring::digest::{Context, SHA256};
@@ -52,4 +53,10 @@ pub fn ecdsa_p256_sha256_sign_verify(public_key: &[u8], signature: &[u8], messag
     result.is_ok()
 }
 
+pub fn current_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_millis() as i64
+}
 
